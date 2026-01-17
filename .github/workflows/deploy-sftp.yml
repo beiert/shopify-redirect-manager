@@ -11,6 +11,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Debug list files
+        run: |
+          echo "PWD:" && pwd
+          echo "Top-level:" && ls -la
+          echo "Files (maxdepth 2):"
+          find . -maxdepth 2 -type f | head -n 200
+
       - name: Deploy to FTPS (port 21)
         uses: SamKirkland/FTP-Deploy-Action@v4.3.6
         with:
