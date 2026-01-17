@@ -28,6 +28,8 @@ jobs:
           port: 21
           server-dir: ${{ secrets.FTP_SERVER_DIR }}
           local-dir: ./
+          security: loose
+          timeout: 60000
           exclude: |
             **/.git/**
             **/.github/**
