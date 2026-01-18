@@ -432,7 +432,18 @@ class SSR_Matcher {
                 continue;
             }
 
-            // PRIORITY 3: FALLBACK on SAME DOMAIN - No exact match found
+            // PRIORITY 3: Try CROSS-DOMAIN matching for exact path
+            // If no match on same domain, check if the exact path exists on another domain (e.g., .pt → .com)
+            // This handles: .pt/fr/pages/code-promo → .com/fr/pages/code-promo
+            $cross_domain_match = $this->find_via_cross_domain($old_url, $old_handle, $old_type, $normalized_locale);
+            if ($cross_domain_match) {
+                error_log("SSR: Using CROSS-DOMAIN match for $old_url");
+                SSR_DB::update_match($redirect['id'], $cross_domain_match['url'], $cross_domain_match['score']);
+                $matched++;
+                continue;
+            }
+
+            // PRIORITY 4: FALLBACK on SAME DOMAIN - No exact match found
             // If no product match on same domain, redirect to category page on SAME domain
             // CRITICAL: Stay on same domain, never redirect to different language!
             $fallback = $this->find_fallback_same_domain($old_url, $old_type, $normalized_locale);
@@ -513,6 +524,134 @@ class SSR_Matcher {
         return false;
     }
     
+    /**
+     * Try to find match via CROSS-DOMAIN matching
+     * When no match found on same domain, check if exact path exists on another domain
+     * Example: canapuff.pt/fr/pages/code-promo → canapuff.com/fr/pages/code-promo
+     *
+     * PRIORITY: .com domain is preferred over country-specific TLDs
+     */
+    private function find_via_cross_domain($old_url, $old_handle, $old_type, $normalized_locale) {
+        // Extract path from old URL (without domain)
+        $old_parsed = parse_url($old_url);
+        if (!isset($old_parsed['host']) || !isset($old_parsed['path'])) {
+            error_log("SSR CROSS-DOMAIN: Cannot parse old URL: $old_url");
+            return null;
+        }
+
+        $old_domain = strtolower($old_parsed['host']);
+        $old_domain = preg_replace('/^www\./', '', $old_domain);
+        $old_path = $old_parsed['path'];
+
+        error_log("SSR CROSS-DOMAIN: Checking $old_url (domain: $old_domain, path: $old_path, handle: $old_handle)");
+
+        // Build list of candidate domains, prioritizing .com
+        $candidate_domains = [];
+        $com_domain = null;
+
+        foreach ($this->catalog as $item) {
+            $item_parsed = parse_url($item['url']);
+            if (!isset($item_parsed['host'])) {
+                continue;
+            }
+
+            $item_domain = strtolower($item_parsed['host']);
+            $item_domain = preg_replace('/^www\./', '', $item_domain);
+
+            // Skip same domain
+            if ($item_domain === $old_domain) {
+                continue;
+            }
+
+            // Track unique domains
+            if (!in_array($item_domain, $candidate_domains)) {
+                $candidate_domains[] = $item_domain;
+
+                // Identify .com domain
+                if (preg_match('/\.com$/', $item_domain)) {
+                    $com_domain = $item_domain;
+                }
+            }
+        }
+
+        // Prioritize .com domain (move to front)
+        if ($com_domain) {
+            $candidate_domains = array_diff($candidate_domains, [$com_domain]);
+            array_unshift($candidate_domains, $com_domain);
+        }
+
+        error_log("SSR CROSS-DOMAIN: Candidate domains (prioritized): " . json_encode($candidate_domains));
+
+        // Search for exact path match on other domains
+        $best_match = null;
+        $best_score = 0;
+
+        foreach ($this->catalog as $item) {
+            // Must match locale
+            if ($item['locale'] !== $normalized_locale) {
+                continue;
+            }
+
+            $item_parsed = parse_url($item['url']);
+            if (!isset($item_parsed['host']) || !isset($item_parsed['path'])) {
+                continue;
+            }
+
+            $item_domain = strtolower($item_parsed['host']);
+            $item_domain = preg_replace('/^www\./', '', $item_domain);
+            $item_path = $item_parsed['path'];
+
+            // Skip same domain
+            if ($item_domain === $old_domain) {
+                continue;
+            }
+
+            // Calculate path similarity
+            $path_similarity = $this->string_similarity($old_path, $item_path);
+
+            // Calculate handle similarity
+            $handle_similarity = $this->string_similarity($old_handle, $item['handle']);
+
+            // Type bonus
+            $type_bonus = ($item['type'] === $old_type) ? 10 : 0;
+
+            // .com bonus (prefer .com over other TLDs)
+            $com_bonus = preg_match('/\.com$/', $item_domain) ? 5 : 0;
+
+            // Exact path match bonus
+            $exact_path_bonus = ($old_path === $item_path) ? 15 : 0;
+
+            $score = ($handle_similarity * 60) + ($path_similarity * 10) + $type_bonus + $com_bonus + $exact_path_bonus;
+
+            // Log promising candidates
+            if ($handle_similarity > 0.7 || $path_similarity > 0.8) {
+                error_log("SSR CROSS-DOMAIN: Candidate found!");
+                error_log("  - Old: $old_url (domain: $old_domain, path: $old_path)");
+                error_log("  - New: {$item['url']} (domain: $item_domain, path: $item_path)");
+                error_log("  - Handle similarity: $handle_similarity");
+                error_log("  - Path similarity: $path_similarity");
+                error_log("  - Score: $score (type_bonus: $type_bonus, com_bonus: $com_bonus, exact_path: $exact_path_bonus)");
+            }
+
+            if ($score > $best_score && ($handle_similarity > 0.7 || ($path_similarity > 0.9 && $exact_path_bonus > 0))) {
+                $best_score = $score;
+                $best_match = $item['url'];
+            }
+        }
+
+        // Require minimum score for cross-domain match (higher threshold since it's a domain change)
+        if ($best_match && $best_score >= 55) {
+            error_log("SSR CROSS-DOMAIN MATCH! $old_url → $best_match (score: $best_score)");
+            return [
+                'url' => $best_match,
+                'score' => round($best_score)
+            ];
+        }
+
+        error_log("SSR CROSS-DOMAIN: No suitable match found on other domains");
+        return null;
+    }
+
     /**
      * Same-Domain Fallback-Strategie
      * CRITICAL: Always stay on the SAME domain as the old URL!
