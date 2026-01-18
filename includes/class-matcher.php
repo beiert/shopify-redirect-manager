@@ -676,52 +676,171 @@ class SSR_Matcher {
     }
 
     /**
-     * Same-Domain Fallback-Strategie
-     * CRITICAL: Always stay on the SAME domain as the old URL!
-     * Never redirect to a different domain/language!
+     * Smart Fallback-Strategie for Multi-Domain Setups
+     *
+     * IMPORTANT: In multi-domain setups, category pages may only exist on .com domain!
+     * Example: canapuff.pt/bg/collections does NOT exist, but canapuff.com/bg/collections DOES
+     *
+     * Strategy:
+     * 1. First try to find fallback on SAME domain (if it exists in catalog)
+     * 2. If not found, try .com domain (primary domain for most content)
+     * 3. Only return URLs that actually exist in the catalog!
      */
     private function find_fallback_same_domain($old_url, $type, $locale) {
         // Extract domain from old URL
         $old_parsed = parse_url($old_url);
         if (!isset($old_parsed['host'])) {
-            error_log("SSR SAME-DOMAIN-FALLBACK: No host in old URL: $old_url");
+            error_log("SSR FALLBACK: No host in old URL: $old_url");
             return null;
         }
 
         $old_domain = strtolower($old_parsed['host']);
-        $base_domain = $old_parsed['scheme'] . '://' . $old_parsed['host'];
+        $old_domain = preg_replace('/^www\./', '', $old_domain);
 
-        error_log("SSR SAME-DOMAIN-FALLBACK: Finding fallback for $old_url on domain $old_domain");
+        error_log("SSR FALLBACK: Finding fallback for $old_url (domain: $old_domain, type: $type, locale: $locale)");
 
-        // For English locales (like en-pt), use 'default' (no locale prefix) on same domain
-        // This handles: .com/en-pt/products/X → .com/products (not .com/en/products)
+        // Build locale prefix
         $locale_prefix = '';
         if ($locale !== 'default' && $locale !== 'en') {
             $locale_prefix = '/' . $locale;
         }
 
+        // Determine fallback paths based on type
+        $fallback_paths = $this->get_fallback_paths_for_type($type, $locale_prefix);
+
+        // Find .com domain from catalog (for cross-domain fallback)
+        $com_domain = $this->find_com_domain();
+
+        // Try each fallback path
+        foreach ($fallback_paths as $fallback_info) {
+            $path = $fallback_info['path'];
+            $score = $fallback_info['score'];
+
+            // PRIORITY 1: Try same domain first
+            $same_domain_url = $this->find_url_in_catalog_by_path($path, $old_domain, $locale);
+            if ($same_domain_url) {
+                error_log("SSR FALLBACK: Found on SAME domain: $same_domain_url");
+                return ['url' => $same_domain_url, 'score' => $score];
+            }
+
+            // PRIORITY 2: Try .com domain (if different from old domain)
+            if ($com_domain && $com_domain !== $old_domain) {
+                $com_url = $this->find_url_in_catalog_by_path($path, $com_domain, $locale);
+                if ($com_url) {
+                    // CRITICAL: Check if path is identical - if so, skip (domain redirect handles it)
+                    $com_path = parse_url($com_url, PHP_URL_PATH);
+                    $old_path = parse_url($old_url, PHP_URL_PATH);
+                    if ($com_path === $old_path) {
+                        error_log("SSR FALLBACK: SKIPPING identical path on .com: $com_url (domain redirect handles this)");
+                        continue;
+                    }
+                    error_log("SSR FALLBACK: Found on .COM domain: $com_url");
+                    return ['url' => $com_url, 'score' => $score - 5]; // Slightly lower score for cross-domain
+                }
+            }
+        }
+
+        error_log("SSR FALLBACK: No valid fallback found in catalog for $old_url");
+        return null;
+    }
+
+    /**
+     * Get ordered list of fallback paths for a given type
+     */
+    private function get_fallback_paths_for_type($type, $locale_prefix) {
         switch ($type) {
             case 'product':
-                // Redirect to /products on SAME domain
-                return ['url' => $base_domain . $locale_prefix . '/products', 'score' => 40];
+                return [
+                    ['path' => $locale_prefix . '/collections/all', 'score' => 40],
+                    ['path' => $locale_prefix . '/collections', 'score' => 35],
+                    ['path' => $locale_prefix . '/', 'score' => 25]
+                ];
 
             case 'collection':
-                // Redirect to /collections on SAME domain
-                return ['url' => $base_domain . $locale_prefix . '/collections', 'score' => 35];
+                return [
+                    ['path' => $locale_prefix . '/collections', 'score' => 35],
+                    ['path' => $locale_prefix . '/collections/all', 'score' => 30],
+                    ['path' => $locale_prefix . '/', 'score' => 25]
+                ];
 
             case 'page':
-                // Redirect to homepage on SAME domain
-                return ['url' => $base_domain . $locale_prefix . '/', 'score' => 25];
+                return [
+                    ['path' => $locale_prefix . '/', 'score' => 25]
+                ];
 
             case 'blog':
             case 'article':
-                // Redirect to /blogs on SAME domain
-                return ['url' => $base_domain . $locale_prefix . '/blogs', 'score' => 30];
+                return [
+                    ['path' => $locale_prefix . '/blogs', 'score' => 30],
+                    ['path' => $locale_prefix . '/', 'score' => 25]
+                ];
 
             default:
-                // Redirect to homepage on SAME domain
-                return ['url' => $base_domain . $locale_prefix . '/', 'score' => 20];
+                return [
+                    ['path' => $locale_prefix . '/', 'score' => 20]
+                ];
         }
+    }
+
+    /**
+     * Find a URL in the catalog by path and domain
+     * Returns the full URL if found, null otherwise
+     */
+    private function find_url_in_catalog_by_path($path, $target_domain, $locale) {
+        // Normalize path (remove trailing slash for comparison)
+        $path = rtrim($path, '/');
+        if (empty($path)) {
+            $path = '/';
+        }
+
+        foreach ($this->catalog as $item) {
+            $item_parsed = parse_url($item['url']);
+            if (!isset($item_parsed['host']) || !isset($item_parsed['path'])) {
+                continue;
+            }
+
+            $item_domain = strtolower($item_parsed['host']);
+            $item_domain = preg_replace('/^www\./', '', $item_domain);
+
+            // Must match target domain
+            if ($item_domain !== $target_domain) {
+                continue;
+            }
+
+            // Compare paths (normalize both)
+            $item_path = rtrim($item_parsed['path'], '/');
+            if (empty($item_path)) {
+                $item_path = '/';
+            }
+
+            if ($item_path === $path) {
+                return $item['url'];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Find the .com domain from the catalog
+     * Returns the domain (without www) or null if not found
+     */
+    private function find_com_domain() {
+        foreach ($this->catalog as $item) {
+            $parsed = parse_url($item['url']);
+            if (!isset($parsed['host'])) {
+                continue;
+            }
+
+            $domain = strtolower($parsed['host']);
+            $domain = preg_replace('/^www\./', '', $domain);
+
+            if (preg_match('/\.com$/', $domain)) {
+                return $domain;
+            }
+        }
+
+        return null;
     }
 
     /**
