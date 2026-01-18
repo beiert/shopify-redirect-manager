@@ -400,17 +400,31 @@ class SSR_Matcher {
         // - Locales from old URLs (old_url_locales)
         $this->build_locale_normalization_map($old_url_locales);
         
+        // Detect if this is a multi-domain setup
+        $is_multi_domain = $this->is_multi_domain_setup();
+        if ($is_multi_domain) {
+            error_log("SSR: Multi-domain setup detected - will skip locale-only paths");
+        }
+
         foreach ($redirects as $redirect) {
             $old_url = $redirect['old_url'];
-            
+
             // Extract info from old URL
             $old_handle = $this->extract_handle($old_url);
             $old_type = $this->get_type($old_url);
             $old_locale = $this->get_locale($old_url);
-            
+
             // CRITICAL: Normalize locale IMMEDIATELY for matching!
             $normalized_locale = $this->normalize_locale($old_locale);
-            
+
+            // MULTI-DOMAIN CHECK: Skip URLs that are ONLY a locale prefix (e.g., /tr, /bg, /es)
+            // In multi-domain setups, domain-level redirects handle: .pt/tr → .com/tr
+            // Creating a redirect for /tr → / would cause loops or wrong behavior!
+            if ($is_multi_domain && $this->is_locale_only_path($old_url)) {
+                error_log("SSR: SKIPPING locale-only path in multi-domain setup: $old_url (domain redirect handles this)");
+                continue;
+            }
+
             // PRIORITY 1: Try hreflang matching FIRST!
             // Example: canapuff.com/en-pt/products/X → canapuff.com/products/X (via hreflang)
             $hreflang_match = $this->find_via_hreflang($old_url, $old_handle, $old_type, $normalized_locale);
@@ -1040,10 +1054,67 @@ class SSR_Matcher {
     private function string_similarity($str1, $str2) {
         $str1 = strtolower($str1);
         $str2 = strtolower($str2);
-        
+
         if ($str1 === $str2) return 1.0;
-        
+
         similar_text($str1, $str2, $percent);
         return $percent / 100;
+    }
+
+    /**
+     * Check if this is a multi-domain setup
+     * Returns true if catalog contains URLs from multiple different domains
+     * Example: canapuff.com, canapuff.pt, canapuff.de = multi-domain
+     */
+    private function is_multi_domain_setup() {
+        $domains = [];
+
+        foreach ($this->catalog as $item) {
+            $parsed = parse_url($item['url']);
+            if (!isset($parsed['host'])) {
+                continue;
+            }
+
+            $domain = strtolower($parsed['host']);
+            $domain = preg_replace('/^www\./', '', $domain);
+
+            if (!in_array($domain, $domains)) {
+                $domains[] = $domain;
+            }
+
+            // Early exit: if we found more than 1 domain, it's multi-domain
+            if (count($domains) > 1) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if URL path is ONLY a locale prefix (e.g., /tr, /bg, /es, /fr/)
+     * These paths should be skipped in multi-domain setups because:
+     * - Domain-level redirect handles: .pt/tr → .com/tr
+     * - Creating /tr → / would cause redirect loops
+     *
+     * Matches: /tr, /tr/, /bg, /es/, /fr, /de-de, /en-gb/
+     * Does NOT match: /tr/products, /bg/collections/xyz, /es/pages/about
+     */
+    private function is_locale_only_path($url) {
+        $path = parse_url($url, PHP_URL_PATH);
+        if (!$path) {
+            return false;
+        }
+
+        // Normalize: remove trailing slash for comparison
+        $path = rtrim($path, '/');
+
+        // Check if path matches ONLY a locale pattern
+        // Matches: /xx or /xx-xx (ISO language codes)
+        if (preg_match('#^/[a-z]{2}(-[a-z]{2})?$#i', $path)) {
+            return true;
+        }
+
+        return false;
     }
 }
