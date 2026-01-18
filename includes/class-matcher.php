@@ -1036,7 +1036,7 @@ class SSR_Matcher {
                 
                 // 2. CRITICAL: Old URL was /products/X → Try /products FIRST!
                 // This makes sense: product → products category (not collections)
-                if ($this->url_exists_in_catalog($locale_prefix . '/products', $locale)) {
+                if ($this->path_exists_in_catalog_for_locale($locale_prefix . '/products', $locale)) {
                     return ['url' => $base_domain . $locale_prefix . '/products', 'score' => 40];
                 }
                 // If /products not in sitemap, but product URLs exist, use it anyway!
@@ -1045,13 +1045,13 @@ class SSR_Matcher {
                 }
                 
                 // 3. Fallback auf /collections/all (if exists)
-                if ($this->url_exists_in_catalog($locale_prefix . '/collections/all', $locale)) {
+                if ($this->path_exists_in_catalog_for_locale($locale_prefix . '/collections/all', $locale)) {
                     return ['url' => $base_domain . $locale_prefix . '/collections/all', 'score' => 35];
                 }
                 
                 // 4. Fallback auf /collections (if exists OR if ANY collections exist!)
                 // Check exact URL first
-                if ($this->url_exists_in_catalog($locale_prefix . '/collections', $locale)) {
+                if ($this->path_exists_in_catalog_for_locale($locale_prefix . '/collections', $locale)) {
                     return ['url' => $base_domain . $locale_prefix . '/collections', 'score' => 30];
                 }
                 // If /collections URL not in sitemap, but collection URLs exist, use it anyway!
@@ -1070,12 +1070,12 @@ class SSR_Matcher {
                 }
                 
                 // 2. Fallback auf /collections/all (if exists)
-                if ($this->url_exists_in_catalog($locale_prefix . '/collections/all', $locale)) {
+                if ($this->path_exists_in_catalog_for_locale($locale_prefix . '/collections/all', $locale)) {
                     return ['url' => $base_domain . $locale_prefix . '/collections/all', 'score' => 35];
                 }
                 
                 // 3. Fallback auf /collections (if exists OR if ANY collections exist!)
-                if ($this->url_exists_in_catalog($locale_prefix . '/collections', $locale)) {
+                if ($this->path_exists_in_catalog_for_locale($locale_prefix . '/collections', $locale)) {
                     return ['url' => $base_domain . $locale_prefix . '/collections', 'score' => 30];
                 }
                 // If /collections not in sitemap, but collection URLs exist, use it anyway!
@@ -1091,7 +1091,7 @@ class SSR_Matcher {
                 $common_pages = ['contact', 'about', 'about-us', 'impressum', 'datenschutz', 'privacy', 'terms'];
                 foreach ($common_pages as $page_slug) {
                     $page_url = $locale_prefix . '/pages/' . $page_slug;
-                    if ($this->url_exists_in_catalog($page_url, $locale)) {
+                    if ($this->path_exists_in_catalog_for_locale($page_url, $locale)) {
                         return ['url' => $base_domain . $page_url, 'score' => 30];
                     }
                 }
@@ -1105,7 +1105,7 @@ class SSR_Matcher {
                 $blog_slug = $this->extract_blog_slug($old_url);
                 if ($blog_slug) {
                     $blog_url = $locale_prefix . '/blogs/' . $blog_slug;
-                    if ($this->url_exists_in_catalog($blog_url, $locale)) {
+                    if ($this->path_exists_in_catalog_for_locale($blog_url, $locale)) {
                         return ['url' => $base_domain . $blog_url, 'score' => 40];
                     }
                 }
@@ -1117,7 +1117,7 @@ class SSR_Matcher {
                 }
                 
                 // 3. Fallback auf /blogs (if exists OR if ANY blogs exist!)
-                if ($this->url_exists_in_catalog($locale_prefix . '/blogs', $locale)) {
+                if ($this->path_exists_in_catalog_for_locale($locale_prefix . '/blogs', $locale)) {
                     return ['url' => $base_domain . $locale_prefix . '/blogs', 'score' => 30];
                 }
                 // If /blogs not in sitemap, but blog URLs exist, use it anyway!
@@ -1214,20 +1214,20 @@ class SSR_Matcher {
     }
     
     /**
-     * Prüfe ob URL im Katalog existiert
+     * Prüfe ob URL-Pfad im Katalog für eine bestimmte Locale existiert
      */
-    private function url_exists_in_catalog($url_path, $locale) {
+    private function path_exists_in_catalog_for_locale($url_path, $locale) {
         foreach ($this->catalog as $item) {
             if ($item['locale'] !== $locale) {
                 continue;
             }
-            
+
             $item_path = parse_url($item['url'], PHP_URL_PATH);
             if ($item_path === $url_path) {
                 return true;
             }
         }
-        
+
         return false;
     }
     
