@@ -446,9 +446,18 @@ class SSR_Matcher {
                 continue;
             }
 
-            // PRIORITY 3: Try CROSS-DOMAIN matching for exact path
-            // If no match on same domain, check if the exact path exists on another domain (e.g., .pt → .com)
-            // This handles: .pt/fr/pages/code-promo → .com/fr/pages/code-promo
+            // PRIORITY 3: Check if IDENTICAL PATH exists on .com domain
+            // If yes, NO redirect needed - domain-level redirect handles it!
+            // This prevents: .pt/cs/collections/xyz → .com/cs/collections (wrong!)
+            // Instead: .pt/cs/collections/xyz → (no redirect, domain handles .pt → .com)
+            if ($is_multi_domain && $this->identical_path_exists_on_com($old_url)) {
+                error_log("SSR: SKIPPING - identical path exists on .com: $old_url (domain redirect handles this)");
+                continue;
+            }
+
+            // PRIORITY 4: Try CROSS-DOMAIN matching for SIMILAR path (different handle)
+            // If no match on same domain, check if a similar product/page exists on another domain
+            // This handles: .pt/fr/pages/old-code → .com/fr/pages/new-code
             $cross_domain_match = $this->find_via_cross_domain($old_url, $old_handle, $old_type, $normalized_locale);
             if ($cross_domain_match) {
                 error_log("SSR: Using CROSS-DOMAIN match for $old_url");
@@ -457,12 +466,11 @@ class SSR_Matcher {
                 continue;
             }
 
-            // PRIORITY 4: FALLBACK on SAME DOMAIN - No exact match found
-            // If no product match on same domain, redirect to category page on SAME domain
-            // CRITICAL: Stay on same domain, never redirect to different language!
+            // PRIORITY 5: FALLBACK - No exact match found anywhere
+            // Redirect to category page (prefer .com if same domain doesn't have it)
             $fallback = $this->find_fallback_same_domain($old_url, $old_type, $normalized_locale);
             if ($fallback) {
-                error_log("SSR: Using SAME-DOMAIN FALLBACK for $old_url");
+                error_log("SSR: Using FALLBACK for $old_url");
                 SSR_DB::update_match($redirect['id'], $fallback['url'], $fallback['score']);
                 $matched++;
             }
@@ -711,6 +719,8 @@ class SSR_Matcher {
         // Find .com domain from catalog (for cross-domain fallback)
         $com_domain = $this->find_com_domain();
 
+        $old_path = parse_url($old_url, PHP_URL_PATH);
+
         // Try each fallback path
         foreach ($fallback_paths as $fallback_info) {
             $path = $fallback_info['path'];
@@ -729,7 +739,6 @@ class SSR_Matcher {
                 if ($com_url) {
                     // CRITICAL: Check if path is identical - if so, skip (domain redirect handles it)
                     $com_path = parse_url($com_url, PHP_URL_PATH);
-                    $old_path = parse_url($old_url, PHP_URL_PATH);
                     if ($com_path === $old_path) {
                         error_log("SSR FALLBACK: SKIPPING identical path on .com: $com_url (domain redirect handles this)");
                         continue;
@@ -737,6 +746,16 @@ class SSR_Matcher {
                     error_log("SSR FALLBACK: Found on .COM domain: $com_url");
                     return ['url' => $com_url, 'score' => $score - 5]; // Slightly lower score for cross-domain
                 }
+            }
+        }
+
+        // PRIORITY 3: If no exact path found, find ANY URL of the same type and locale on .com
+        // This handles cases where /cs/collections doesn't exist but /cs/collections/all does
+        if ($com_domain && $com_domain !== $old_domain) {
+            $any_matching_url = $this->find_any_url_by_type_and_locale($type, $locale, $com_domain, $old_path);
+            if ($any_matching_url) {
+                error_log("SSR FALLBACK: Found ANY matching URL on .COM domain: $any_matching_url");
+                return ['url' => $any_matching_url, 'score' => 20];
             }
         }
 
@@ -841,6 +860,94 @@ class SSR_Matcher {
         }
 
         return null;
+    }
+
+    /**
+     * Find ANY URL in the catalog that matches the given type, locale, and domain
+     * Used as a last resort fallback when exact paths don't exist
+     *
+     * Priority order:
+     * 1. /locale/collections/all (for products/collections)
+     * 2. /locale/collections (index page)
+     * 3. Any collection URL in that locale
+     * 4. Homepage with locale
+     */
+    private function find_any_url_by_type_and_locale($type, $locale, $target_domain, $old_path) {
+        $locale_prefix = '';
+        if ($locale !== 'default' && $locale !== 'en') {
+            $locale_prefix = '/' . $locale;
+        }
+
+        // Define what type of URLs we're looking for based on original type
+        $target_type = $type;
+        if ($type === 'product') {
+            $target_type = 'collection'; // Products should fallback to collections
+        }
+
+        $best_url = null;
+        $best_priority = 999;
+
+        foreach ($this->catalog as $item) {
+            // Must match locale
+            if ($item['locale'] !== $locale) {
+                continue;
+            }
+
+            $item_parsed = parse_url($item['url']);
+            if (!isset($item_parsed['host']) || !isset($item_parsed['path'])) {
+                continue;
+            }
+
+            $item_domain = strtolower($item_parsed['host']);
+            $item_domain = preg_replace('/^www\./', '', $item_domain);
+
+            // Must match target domain
+            if ($item_domain !== $target_domain) {
+                continue;
+            }
+
+            $item_path = $item_parsed['path'];
+
+            // CRITICAL: Skip if path is identical to old path (would cause redirect loop)
+            if ($item_path === $old_path || rtrim($item_path, '/') === rtrim($old_path, '/')) {
+                continue;
+            }
+
+            // Assign priority based on URL structure
+            $priority = 999;
+
+            if ($type === 'product' || $type === 'collection') {
+                // For products/collections, prefer collections URLs
+                if (preg_match('#' . preg_quote($locale_prefix, '#') . '/collections/all/?$#', $item_path)) {
+                    $priority = 1; // Best: /cs/collections/all
+                } elseif (preg_match('#' . preg_quote($locale_prefix, '#') . '/collections/?$#', $item_path)) {
+                    $priority = 2; // Good: /cs/collections
+                } elseif ($item['type'] === 'collection') {
+                    $priority = 3; // OK: any collection in this locale
+                } elseif (preg_match('#^' . preg_quote($locale_prefix, '#') . '/?$#', $item_path)) {
+                    $priority = 10; // Last resort: homepage /cs/
+                }
+            } elseif ($type === 'blog' || $type === 'article') {
+                if (preg_match('#' . preg_quote($locale_prefix, '#') . '/blogs/?$#', $item_path)) {
+                    $priority = 1;
+                } elseif ($item['type'] === 'blog') {
+                    $priority = 2;
+                } elseif (preg_match('#^' . preg_quote($locale_prefix, '#') . '/?$#', $item_path)) {
+                    $priority = 10;
+                }
+            } elseif ($type === 'page') {
+                if (preg_match('#^' . preg_quote($locale_prefix, '#') . '/?$#', $item_path)) {
+                    $priority = 1; // Homepage for pages
+                }
+            }
+
+            if ($priority < $best_priority) {
+                $best_priority = $priority;
+                $best_url = $item['url'];
+            }
+        }
+
+        return $best_url;
     }
 
     /**
@@ -1178,6 +1285,56 @@ class SSR_Matcher {
 
         similar_text($str1, $str2, $percent);
         return $percent / 100;
+    }
+
+    /**
+     * Check if the IDENTICAL path exists on the .com domain
+     * Used to determine if we should skip creating a redirect (domain redirect handles it)
+     *
+     * Example: canapuff.pt/cs/collections/konopny-caj
+     * If canapuff.com/cs/collections/konopny-caj exists → return true (no redirect needed)
+     * If it doesn't exist → return false (need fallback redirect)
+     */
+    private function identical_path_exists_on_com($old_url) {
+        $old_parsed = parse_url($old_url);
+        if (!isset($old_parsed['path'])) {
+            return false;
+        }
+
+        $old_path = $old_parsed['path'];
+        $old_domain = isset($old_parsed['host']) ? strtolower($old_parsed['host']) : '';
+        $old_domain = preg_replace('/^www\./', '', $old_domain);
+
+        // Find .com domain
+        $com_domain = $this->find_com_domain();
+        if (!$com_domain || $com_domain === $old_domain) {
+            return false; // No .com domain or already on .com
+        }
+
+        // Check if identical path exists on .com
+        foreach ($this->catalog as $item) {
+            $item_parsed = parse_url($item['url']);
+            if (!isset($item_parsed['host']) || !isset($item_parsed['path'])) {
+                continue;
+            }
+
+            $item_domain = strtolower($item_parsed['host']);
+            $item_domain = preg_replace('/^www\./', '', $item_domain);
+
+            // Must be on .com domain
+            if ($item_domain !== $com_domain) {
+                continue;
+            }
+
+            // Check if path is identical
+            $item_path = $item_parsed['path'];
+            if ($item_path === $old_path || rtrim($item_path, '/') === rtrim($old_path, '/')) {
+                error_log("SSR: Identical path found on .com: $old_path → {$item['url']}");
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
