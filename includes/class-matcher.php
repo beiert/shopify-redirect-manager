@@ -755,17 +755,19 @@ class SSR_Matcher {
             }
         }
 
-        // PRIORITY 3: If no exact path found, find ANY URL of the same type and locale on .com
-        // This handles cases where /cs/collections doesn't exist but /cs/collections/all does
-        if ($com_domain && $com_domain !== $old_domain) {
-            $any_matching_url = $this->find_any_url_by_type_and_locale($type, $locale, $com_domain, $old_path);
-            if ($any_matching_url) {
-                error_log("SSR FALLBACK: Found ANY matching URL on .COM domain: $any_matching_url");
-                return ['url' => $any_matching_url, 'score' => 20];
-            }
+        // PRIORITY 3: Try to find category page on SAME domain (e.g., /products for products)
+        // Products from .pt should stay on .pt, not jump to .com!
+        $same_domain_category = $this->find_any_url_by_type_and_locale($type, $locale, $old_domain, $old_path);
+        if ($same_domain_category) {
+            error_log("SSR FALLBACK: Found category URL on SAME domain: $same_domain_category");
+            return ['url' => $same_domain_category, 'score' => 25];
         }
 
-        error_log("SSR FALLBACK: No valid fallback found in catalog for $old_url");
+        // PRIORITY 4: No category page on same domain exists
+        // DON'T redirect to .com - let the domain-level redirect handle it!
+        // Creating a redirect from .pt/products/xyz → .com/products would cause issues
+        // because Shopify redirects are path-based only.
+        error_log("SSR FALLBACK: No category page on same domain - skipping (domain redirect will handle .pt → .com)");
         return null;
     }
 
@@ -925,18 +927,17 @@ class SSR_Matcher {
             $priority = 999;
 
             if ($type === 'product') {
-                // For products, prefer /products page, then collections
+                // For products, prefer /products page, then /collections/all or /collections
+                // DO NOT fallback to random specific collections (like /collections/hhc-flowers)!
                 if (preg_match('#^' . preg_quote($locale_prefix, '#') . '/products/?$#', $item_path)) {
-                    $priority = 1; // Best: /cs/products
+                    $priority = 1; // Best: /products or /cs/products
                 } elseif (preg_match('#^' . preg_quote($locale_prefix, '#') . '/collections/all/?$#', $item_path)) {
-                    $priority = 2; // Good: /cs/collections/all
+                    $priority = 2; // Good: /collections/all
                 } elseif (preg_match('#^' . preg_quote($locale_prefix, '#') . '/collections/?$#', $item_path)) {
-                    $priority = 3; // OK: /cs/collections (index page)
-                } elseif ($item['type'] === 'collection' && strpos($item_path, '/collections/') !== false) {
-                    $priority = 4; // OK: any specific collection in this locale
-                } elseif (preg_match('#^' . preg_quote($locale_prefix, '#') . '/?$#', $item_path)) {
-                    $priority = 50; // Last resort: homepage /cs/
+                    $priority = 3; // OK: /collections (index page only, NOT specific collections!)
                 }
+                // REMOVED: any specific collection fallback - it makes no sense to redirect
+                // /products/melatonin-gummies to /collections/hhc-flowers!
             } elseif ($type === 'collection') {
                 // For collections, prefer collections pages
                 if (preg_match('#^' . preg_quote($locale_prefix, '#') . '/collections/all/?$#', $item_path)) {
@@ -968,15 +969,9 @@ class SSR_Matcher {
                 $best_url = $item['url'];
             }
 
-            // Also track any collection as backup (in case no priority match is found)
-            // This ensures we always return SOMETHING better than nothing
-            if ($best_url === null && ($type === 'product' || $type === 'collection')) {
-                if (strpos($item_path, '/collections/') !== false && strpos($item_path, '/collections/all') === false) {
-                    // Found a collection URL - use as backup
-                    $best_url = $item['url'];
-                    $best_priority = 100; // Low priority backup
-                }
-            }
+            // REMOVED: "any collection as backup" mechanism
+            // It caused products to redirect to random collections like /collections/hhc-flowers
+            // If no proper category page exists, we return null and let domain redirect handle it
         }
 
         // Log what we found
