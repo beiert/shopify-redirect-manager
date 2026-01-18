@@ -727,6 +727,17 @@ class SSR_Matcher {
 
         $old_path = parse_url($old_url, PHP_URL_PATH);
 
+        // PRIORITY 0: Check if IDENTICAL path exists on .com
+        // If yes, NO REDIRECT NEEDED - domain redirect handles .pt → .com automatically
+        // Example: .pt/cs/pages/facebook-cs → .com/cs/pages/facebook-cs exists = skip!
+        if ($com_domain && $com_domain !== $old_domain) {
+            $identical_on_com = $this->find_url_in_catalog_by_path($old_path, $com_domain, $locale);
+            if ($identical_on_com) {
+                error_log("SSR FALLBACK: IDENTICAL path exists on .com - NO REDIRECT NEEDED: $identical_on_com");
+                return null; // Domain redirect handles .pt → .com
+            }
+        }
+
         // Try each fallback path
         foreach ($fallback_paths as $fallback_info) {
             $path = $fallback_info['path'];
