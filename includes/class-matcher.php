@@ -757,20 +757,10 @@ class SSR_Matcher {
                 return ['url' => $same_domain_url, 'score' => $score];
             }
 
-            // PRIORITY 2: Try .com domain (if different from old domain)
-            if ($com_domain && $com_domain !== $old_domain) {
-                $com_url = $this->find_url_in_catalog_by_path($path, $com_domain, $locale);
-                if ($com_url) {
-                    // CRITICAL: Check if path is identical - if so, skip (domain redirect handles it)
-                    $com_path = parse_url($com_url, PHP_URL_PATH);
-                    if ($com_path === $old_path) {
-                        error_log("SSR FALLBACK: SKIPPING identical path on .com: $com_url (domain redirect handles this)");
-                        continue;
-                    }
-                    error_log("SSR FALLBACK: Found on .COM domain: $com_url");
-                    return ['url' => $com_url, 'score' => $score - 5]; // Slightly lower score for cross-domain
-                }
-            }
+            // PRIORITY 2: NEVER fall back to .com from other domains!
+            // The content might exist on .com (just not in sitemap), so domain redirect should handle it.
+            // Creating cross-domain redirects causes loops and wrong behavior.
+            // Domain redirect handles: .pt → .com automatically
         }
 
         // PRIORITY 3: Try to find category page on SAME domain (e.g., /products for products)
@@ -810,9 +800,12 @@ class SSR_Matcher {
                 ];
 
             case 'page':
+                // For pages: ONLY try /pages, NO homepage fallback!
+                // Pages are unique - redirecting /pages/facebook-cs to / makes no sense
+                // If page doesn't exist, let domain redirect handle it (or return null)
                 return [
-                    ['path' => $locale_prefix . '/pages', 'score' => 30],          // Try /pages first
-                    ['path' => $locale_prefix . '/', 'score' => 25]                // Then homepage
+                    ['path' => $locale_prefix . '/pages', 'score' => 30]
+                    // NO homepage fallback for pages - it causes wrong redirects!
                 ];
 
             case 'blog':
@@ -957,28 +950,28 @@ class SSR_Matcher {
                 // REMOVED: any specific collection fallback - it makes no sense to redirect
                 // /products/melatonin-gummies to /collections/hhc-flowers!
             } elseif ($type === 'collection') {
-                // For collections, prefer collections pages
+                // For collections, prefer collections pages - NO homepage fallback!
                 if (preg_match('#^' . preg_quote($locale_prefix, '#') . '/collections/all/?$#', $item_path)) {
                     $priority = 1; // Best: /cs/collections/all
                 } elseif (preg_match('#^' . preg_quote($locale_prefix, '#') . '/collections/?$#', $item_path)) {
                     $priority = 2; // Good: /cs/collections (index page)
                 } elseif ($item['type'] === 'collection' && strpos($item_path, '/collections/') !== false) {
                     $priority = 3; // OK: any specific collection in this locale (e.g., /cs/collections/xyz)
-                } elseif (preg_match('#^' . preg_quote($locale_prefix, '#') . '/?$#', $item_path)) {
-                    $priority = 50; // Last resort: homepage /cs/ - much lower priority!
                 }
+                // NO homepage fallback - domain redirect handles it
             } elseif ($type === 'blog' || $type === 'article') {
+                // For blogs - NO homepage fallback!
                 if (preg_match('#^' . preg_quote($locale_prefix, '#') . '/blogs/?$#', $item_path)) {
                     $priority = 1; // Best: /cs/blogs
                 } elseif ($item['type'] === 'blog' && strpos($item_path, '/blogs/') !== false) {
                     $priority = 2; // OK: any specific blog
-                } elseif (preg_match('#^' . preg_quote($locale_prefix, '#') . '/?$#', $item_path)) {
-                    $priority = 50; // Last resort: homepage
                 }
+                // NO homepage fallback - domain redirect handles it
             } elseif ($type === 'page') {
-                if (preg_match('#^' . preg_quote($locale_prefix, '#') . '/?$#', $item_path)) {
-                    $priority = 1; // Homepage for pages (this is appropriate for pages)
-                }
+                // For pages: NO fallback at all!
+                // Pages are unique - /pages/facebook-cs should NOT redirect to homepage
+                // If the page doesn't exist in catalog, return null and let domain redirect handle it
+                $priority = 999; // Never match anything for pages
             }
 
             // Track best match by priority
