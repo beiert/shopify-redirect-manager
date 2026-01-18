@@ -409,6 +409,12 @@ class SSR_Matcher {
         foreach ($redirects as $redirect) {
             $old_url = $redirect['old_url'];
 
+            // VALIDATION: Skip invalid/malformed URLs
+            if ($this->is_invalid_url($old_url)) {
+                error_log("SSR: SKIPPING invalid URL: $old_url");
+                continue;
+            }
+
             // Extract info from old URL
             $old_handle = $this->extract_handle($old_url);
             $old_type = $this->get_type($old_url);
@@ -770,33 +776,35 @@ class SSR_Matcher {
         switch ($type) {
             case 'product':
                 return [
-                    ['path' => $locale_prefix . '/collections/all', 'score' => 40],
+                    ['path' => $locale_prefix . '/products', 'score' => 40],      // Best: /cs/products
+                    ['path' => $locale_prefix . '/collections/all', 'score' => 38],
                     ['path' => $locale_prefix . '/collections', 'score' => 35],
-                    ['path' => $locale_prefix . '/', 'score' => 25]
+                    // Homepage removed - will be handled by find_any_url_by_type_and_locale if needed
                 ];
 
             case 'collection':
                 return [
                     ['path' => $locale_prefix . '/collections', 'score' => 35],
                     ['path' => $locale_prefix . '/collections/all', 'score' => 30],
-                    ['path' => $locale_prefix . '/', 'score' => 25]
+                    // Homepage removed - will be handled by find_any_url_by_type_and_locale if needed
                 ];
 
             case 'page':
                 return [
-                    ['path' => $locale_prefix . '/', 'score' => 25]
+                    ['path' => $locale_prefix . '/pages', 'score' => 30],          // Try /pages first
+                    ['path' => $locale_prefix . '/', 'score' => 25]                // Then homepage
                 ];
 
             case 'blog':
             case 'article':
                 return [
                     ['path' => $locale_prefix . '/blogs', 'score' => 30],
-                    ['path' => $locale_prefix . '/', 'score' => 25]
+                    // Homepage removed - will be handled by find_any_url_by_type_and_locale if needed
                 ];
 
             default:
                 return [
-                    ['path' => $locale_prefix . '/', 'score' => 20]
+                    // Empty - let find_any_url_by_type_and_locale handle it
                 ];
         }
     }
@@ -916,35 +924,66 @@ class SSR_Matcher {
             // Assign priority based on URL structure
             $priority = 999;
 
-            if ($type === 'product' || $type === 'collection') {
-                // For products/collections, prefer collections URLs
-                if (preg_match('#' . preg_quote($locale_prefix, '#') . '/collections/all/?$#', $item_path)) {
-                    $priority = 1; // Best: /cs/collections/all
-                } elseif (preg_match('#' . preg_quote($locale_prefix, '#') . '/collections/?$#', $item_path)) {
-                    $priority = 2; // Good: /cs/collections
-                } elseif ($item['type'] === 'collection') {
-                    $priority = 3; // OK: any collection in this locale
+            if ($type === 'product') {
+                // For products, prefer /products page, then collections
+                if (preg_match('#^' . preg_quote($locale_prefix, '#') . '/products/?$#', $item_path)) {
+                    $priority = 1; // Best: /cs/products
+                } elseif (preg_match('#^' . preg_quote($locale_prefix, '#') . '/collections/all/?$#', $item_path)) {
+                    $priority = 2; // Good: /cs/collections/all
+                } elseif (preg_match('#^' . preg_quote($locale_prefix, '#') . '/collections/?$#', $item_path)) {
+                    $priority = 3; // OK: /cs/collections (index page)
+                } elseif ($item['type'] === 'collection' && strpos($item_path, '/collections/') !== false) {
+                    $priority = 4; // OK: any specific collection in this locale
                 } elseif (preg_match('#^' . preg_quote($locale_prefix, '#') . '/?$#', $item_path)) {
-                    $priority = 10; // Last resort: homepage /cs/
+                    $priority = 50; // Last resort: homepage /cs/
+                }
+            } elseif ($type === 'collection') {
+                // For collections, prefer collections pages
+                if (preg_match('#^' . preg_quote($locale_prefix, '#') . '/collections/all/?$#', $item_path)) {
+                    $priority = 1; // Best: /cs/collections/all
+                } elseif (preg_match('#^' . preg_quote($locale_prefix, '#') . '/collections/?$#', $item_path)) {
+                    $priority = 2; // Good: /cs/collections (index page)
+                } elseif ($item['type'] === 'collection' && strpos($item_path, '/collections/') !== false) {
+                    $priority = 3; // OK: any specific collection in this locale (e.g., /cs/collections/xyz)
+                } elseif (preg_match('#^' . preg_quote($locale_prefix, '#') . '/?$#', $item_path)) {
+                    $priority = 50; // Last resort: homepage /cs/ - much lower priority!
                 }
             } elseif ($type === 'blog' || $type === 'article') {
-                if (preg_match('#' . preg_quote($locale_prefix, '#') . '/blogs/?$#', $item_path)) {
-                    $priority = 1;
-                } elseif ($item['type'] === 'blog') {
-                    $priority = 2;
+                if (preg_match('#^' . preg_quote($locale_prefix, '#') . '/blogs/?$#', $item_path)) {
+                    $priority = 1; // Best: /cs/blogs
+                } elseif ($item['type'] === 'blog' && strpos($item_path, '/blogs/') !== false) {
+                    $priority = 2; // OK: any specific blog
                 } elseif (preg_match('#^' . preg_quote($locale_prefix, '#') . '/?$#', $item_path)) {
-                    $priority = 10;
+                    $priority = 50; // Last resort: homepage
                 }
             } elseif ($type === 'page') {
                 if (preg_match('#^' . preg_quote($locale_prefix, '#') . '/?$#', $item_path)) {
-                    $priority = 1; // Homepage for pages
+                    $priority = 1; // Homepage for pages (this is appropriate for pages)
                 }
             }
 
+            // Track best match by priority
             if ($priority < $best_priority) {
                 $best_priority = $priority;
                 $best_url = $item['url'];
             }
+
+            // Also track any collection as backup (in case no priority match is found)
+            // This ensures we always return SOMETHING better than nothing
+            if ($best_url === null && ($type === 'product' || $type === 'collection')) {
+                if (strpos($item_path, '/collections/') !== false && strpos($item_path, '/collections/all') === false) {
+                    // Found a collection URL - use as backup
+                    $best_url = $item['url'];
+                    $best_priority = 100; // Low priority backup
+                }
+            }
+        }
+
+        // Log what we found
+        if ($best_url) {
+            error_log("SSR find_any_url_by_type_and_locale: Found $best_url with priority $best_priority");
+        } else {
+            error_log("SSR find_any_url_by_type_and_locale: No suitable URL found for type=$type, locale=$locale");
         }
 
         return $best_url;
@@ -1360,6 +1399,47 @@ class SSR_Matcher {
 
             // Early exit: if we found more than 1 domain, it's multi-domain
             if (count($domains) > 1) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if URL is invalid/malformed and should be skipped
+     *
+     * Invalid URLs include:
+     * - URLs with commas in the path (e.g., /,cart,product,list-collections,...)
+     * - URLs ending with .atom (RSS/Atom feeds)
+     * - URLs with other malformed patterns
+     *
+     * @param string $url The URL to check
+     * @return bool True if URL is invalid and should be skipped
+     */
+    private function is_invalid_url($url) {
+        $path = parse_url($url, PHP_URL_PATH);
+        if (!$path) {
+            return false;
+        }
+
+        // Check for commas in path (malformed URL like /,cart,product,...)
+        if (strpos($path, ',') !== false) {
+            error_log("SSR is_invalid_url: URL contains comma - $url");
+            return true;
+        }
+
+        // Check for .atom ending (RSS/Atom feeds)
+        if (preg_match('/\.atom$/i', $path)) {
+            error_log("SSR is_invalid_url: URL ends with .atom - $url");
+            return true;
+        }
+
+        // Check for other feed-related extensions
+        if (preg_match('/\.(rss|xml|json)$/i', $path)) {
+            // Only skip if it looks like a feed URL
+            if (strpos($path, '/feed') !== false || strpos($path, '/tagged/') !== false) {
+                error_log("SSR is_invalid_url: URL appears to be a feed - $url");
                 return true;
             }
         }
