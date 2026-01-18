@@ -431,6 +431,22 @@ class SSR_Matcher {
                 continue;
             }
 
+            // PRIORITY 0a: Check if OLD URL STILL EXISTS in catalog (same domain)!
+            // If yes, NO redirect needed - the page is not deleted!
+            // This prevents: .pt/cs/pages/facebook-cs → .com/cs (WRONG - page still exists on .pt!)
+            if ($this->url_exists_in_catalog($old_url)) {
+                error_log("SSR: SKIPPING - old URL still exists in catalog: $old_url (no redirect needed)");
+                continue;
+            }
+
+            // PRIORITY 0b: Check if IDENTICAL PATH exists on .com domain
+            // If yes, NO redirect needed - domain-level redirect handles .pt → .com automatically!
+            // This prevents: .pt/cs/pages/facebook-cs → .com/cs (WRONG - .com/cs/pages/facebook-cs exists!)
+            if ($is_multi_domain && $this->identical_path_exists_on_com($old_url)) {
+                error_log("SSR: SKIPPING - identical path exists on .com: $old_url (domain redirect handles this)");
+                continue;
+            }
+
             // PRIORITY 1: Try hreflang matching FIRST!
             // Example: canapuff.com/en-pt/products/X → canapuff.com/products/X (via hreflang)
             $hreflang_match = $this->find_via_hreflang($old_url, $old_handle, $old_type, $normalized_locale);
@@ -452,16 +468,7 @@ class SSR_Matcher {
                 continue;
             }
 
-            // PRIORITY 3: Check if IDENTICAL PATH exists on .com domain
-            // If yes, NO redirect needed - domain-level redirect handles it!
-            // This prevents: .pt/cs/collections/xyz → .com/cs/collections (wrong!)
-            // Instead: .pt/cs/collections/xyz → (no redirect, domain handles .pt → .com)
-            if ($is_multi_domain && $this->identical_path_exists_on_com($old_url)) {
-                error_log("SSR: SKIPPING - identical path exists on .com: $old_url (domain redirect handles this)");
-                continue;
-            }
-
-            // PRIORITY 4: Try CROSS-DOMAIN matching for SIMILAR path (different handle)
+            // PRIORITY 3: Try CROSS-DOMAIN matching for SIMILAR path (different handle)
             // If no match on same domain, check if a similar product/page exists on another domain
             // This handles: .pt/fr/pages/old-code → .com/fr/pages/new-code
             $cross_domain_match = $this->find_via_cross_domain($old_url, $old_handle, $old_type, $normalized_locale);
@@ -1375,6 +1382,55 @@ class SSR_Matcher {
             $item_path = $item_parsed['path'];
             if ($item_path === $old_path || rtrim($item_path, '/') === rtrim($old_path, '/')) {
                 error_log("SSR: Identical path found on .com: $old_path → {$item['url']}");
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if the EXACT old URL still exists in the catalog
+     * If yes, the page is NOT deleted and no redirect is needed!
+     * This prevents self-redirects and loops.
+     *
+     * Example: .pt/cs/pages/facebook-cs exists in catalog → skip (no redirect needed)
+     */
+    private function url_exists_in_catalog($old_url) {
+        $old_parsed = parse_url($old_url);
+        if (!isset($old_parsed['host']) || !isset($old_parsed['path'])) {
+            return false;
+        }
+
+        $old_domain = strtolower($old_parsed['host']);
+        $old_domain = preg_replace('/^www\./', '', $old_domain);
+        $old_path = rtrim($old_parsed['path'], '/');
+        if (empty($old_path)) {
+            $old_path = '/';
+        }
+
+        foreach ($this->catalog as $item) {
+            $item_parsed = parse_url($item['url']);
+            if (!isset($item_parsed['host']) || !isset($item_parsed['path'])) {
+                continue;
+            }
+
+            $item_domain = strtolower($item_parsed['host']);
+            $item_domain = preg_replace('/^www\./', '', $item_domain);
+
+            // Must match SAME domain
+            if ($item_domain !== $old_domain) {
+                continue;
+            }
+
+            // Check if path is identical
+            $item_path = rtrim($item_parsed['path'], '/');
+            if (empty($item_path)) {
+                $item_path = '/';
+            }
+
+            if ($item_path === $old_path) {
+                error_log("SSR: Old URL still exists in catalog: $old_url → {$item['url']}");
                 return true;
             }
         }
