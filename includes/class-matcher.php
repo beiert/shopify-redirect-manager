@@ -527,7 +527,11 @@ class SSR_Matcher {
     /**
      * Try to find match via CROSS-DOMAIN matching
      * When no match found on same domain, check if exact path exists on another domain
-     * Example: canapuff.pt/fr/pages/code-promo → canapuff.com/fr/pages/code-promo
+     * Example: canapuff.pt/fr/pages/old-code → canapuff.com/fr/pages/new-code
+     *
+     * IMPORTANT: If the path is IDENTICAL on both domains, NO redirect is needed!
+     * Shopify's domain-level redirect already handles: .pt/es → .com/es
+     * Creating a path redirect for identical paths would cause ERR_TOO_MANY_REDIRECTS!
      *
      * PRIORITY: .com domain is preferred over country-specific TLDs
      */
@@ -606,6 +610,14 @@ class SSR_Matcher {
                 continue;
             }
 
+            // CRITICAL: Skip if path is IDENTICAL!
+            // Shopify's domain-level redirect already handles: .pt/es → .com/es
+            // Creating a redirect for /es → /es would cause ERR_TOO_MANY_REDIRECTS!
+            if ($old_path === $item_path) {
+                error_log("SSR CROSS-DOMAIN: SKIPPING identical path! $old_path exists on $item_domain - no redirect needed (domain redirect handles this)");
+                continue;
+            }
+
             // Calculate path similarity
             $path_similarity = $this->string_similarity($old_path, $item_path);
 
@@ -618,10 +630,7 @@ class SSR_Matcher {
             // .com bonus (prefer .com over other TLDs)
             $com_bonus = preg_match('/\.com$/', $item_domain) ? 5 : 0;
 
-            // Exact path match bonus
-            $exact_path_bonus = ($old_path === $item_path) ? 15 : 0;
-
-            $score = ($handle_similarity * 60) + ($path_similarity * 10) + $type_bonus + $com_bonus + $exact_path_bonus;
+            $score = ($handle_similarity * 60) + ($path_similarity * 10) + $type_bonus + $com_bonus;
 
             // Log promising candidates
             if ($handle_similarity > 0.7 || $path_similarity > 0.8) {
@@ -630,10 +639,10 @@ class SSR_Matcher {
                 error_log("  - New: {$item['url']} (domain: $item_domain, path: $item_path)");
                 error_log("  - Handle similarity: $handle_similarity");
                 error_log("  - Path similarity: $path_similarity");
-                error_log("  - Score: $score (type_bonus: $type_bonus, com_bonus: $com_bonus, exact_path: $exact_path_bonus)");
+                error_log("  - Score: $score (type_bonus: $type_bonus, com_bonus: $com_bonus)");
             }
 
-            if ($score > $best_score && ($handle_similarity > 0.7 || ($path_similarity > 0.9 && $exact_path_bonus > 0))) {
+            if ($score > $best_score && $handle_similarity > 0.7) {
                 $best_score = $score;
                 $best_match = $item['url'];
             }
